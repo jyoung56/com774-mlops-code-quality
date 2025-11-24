@@ -26,7 +26,6 @@ jobs:
 
       - name: Run unit tests
         env:
-          # Ensure remote integration tests stay skipped in CI
           TEST_REMOTE_ENDPOINT: "0"
         run: |
           pytest -q

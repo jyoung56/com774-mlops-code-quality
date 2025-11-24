@@ -5,7 +5,12 @@ from typing import Any, Dict
 import joblib
 import pandas as pd
 
-# These are the feature columns your model was trained on
+# ------------------------------------------------------------------------
+# FEATURE COLUMNS
+# These are the exact inputs your model expects in the same order that it
+# was trained on. Keeping this list explicit prevents schema drift.
+# ------------------------------------------------------------------------
+
 FEATURE_COLUMNS = [
     "lines_of_code__scaled",
     "number_of_classes__scaled",
@@ -19,28 +24,43 @@ FEATURE_COLUMNS = [
     "forks__scaled",
 ]
 
+
+# The filename AzureML automatically stores inside AZUREML_MODEL_DIR
 MODEL_FILENAME = "model.joblib"
 
-model = None  # will be loaded in init()
 
+# Global model instance populated by init()
+model = None  
 
+# ------------------------------------------------------------------------
+# INIT FUNCTION
+# ------------------------------------------------------------------------
 def init():
     """
-    AzureML calls this once when the container starts.
-    For local tests, this will also run on first import.
+    AzureML automatically calls this ONCE when the scoring container starts.
+
+    Responsibilities:
+    - Locate the registered model file inside the AzureML container
+      using the AZUREML_MODEL_DIR environment variable.
+    - Fall back to local paths for unit testing.
+    - Load the model globally so that run() can use it repeatedly.
+
+    If the model cannot be found (e.g. during local tests),
+    we leave `model = None` and unit tests can inject a dummy model.
+
     """
     global model
 
-    # AZUREML_MODEL_DIR is set in the online endpoint container.
-    # Locally, it may not exist, so we fall back to ./outputs or .
+    # AzureML sets this when the endpoint container starts
     model_dir = os.getenv("AZUREML_MODEL_DIR", None)
 
+    # Paths checked in order, depending on environment
     candidates = []
 
     if model_dir:
         candidates.append(os.path.join(model_dir, MODEL_FILENAME))
 
-    # Common local path (after training run)
+    # Local development fallback locations
     candidates.append(os.path.join("outputs", MODEL_FILENAME))
     candidates.append(MODEL_FILENAME)
 
@@ -51,8 +71,7 @@ def init():
             break
 
     if model_path is None:
-        # For local unit tests we’ll usually inject a DummyModel anyway,
-        # so it’s fine if we don’t find a real model here.
+        # No real model = acceptable for local tests
         print("[score] No model file found; model will need to be injected for tests.")
         model = None
         return
@@ -60,11 +79,21 @@ def init():
     print(f"[score] Loading model from: {model_path}")
     model = joblib.load(model_path)
 
-
+# ------------------------------------------------------------------------
+# FEATURE PREPARATION
+# ------------------------------------------------------------------------
 def _prepare_features(payload: Dict[str, Any]) -> pd.DataFrame:
     """
-    Take the incoming JSON payload and turn it into a DataFrame
-    with exactly the columns the model expects.
+    Converts the incoming JSON payload into a Pandas DataFrame
+    structured EXACTLY like the model's training data.
+
+    This validates:
+      - 'data' exists
+      - 'data' is a list of rows
+      - all expected feature columns are present
+
+    Raises ValueError with clear messaging if the schema is invalid.
+
     """
     if "data" not in payload:
         raise ValueError("Request JSON must contain a 'data' field with a list of rows.")
@@ -73,35 +102,53 @@ def _prepare_features(payload: Dict[str, Any]) -> pd.DataFrame:
     if not isinstance(rows, list):
         raise ValueError("'data' must be a list of objects.")
 
+    # Convert rows into a DataFrame
     df = pd.DataFrame(rows)
 
+    # Check for schema mismatch (very important in MLOps)
     missing = [c for c in FEATURE_COLUMNS if c not in df.columns]
+
     if missing:
         raise ValueError(f"Missing required feature columns in request: {missing}")
 
+    # Column order must match training order
     return df[FEATURE_COLUMNS]
 
 
+# ------------------------------------------------------------------------
+# RUN FUNCTION — MAIN SCORING ENTRYPOINT
+# ------------------------------------------------------------------------
 def run(raw_data: Any) -> Dict[str, Any]:
     """
-    This is the entrypoint AzureML uses for scoring.
-    It also works locally in tests.
+
+    AzureML calls this function for every scoring request.
+
+    Behaviour:
+    - Accepts either a JSON string (Azure) or a Python dict (local tests)
+    - Prepares features into a DataFrame
+    - If a real model exists → predict labels + probabilities
+    - If no real model → use dummy fallback (unit-testing behaviour)
+    - Returns a JSON-serialisable dict
+
+    This function MUST NOT crash — any exception must be caught
+    and returned as {"error": "..."} so that Azure endpoint stays healthy.
+
     """
     try:
-        # raw_data is usually a JSON string from Azure / tests
+        # raw_data is a JSON string in production, dict in tests
         if isinstance(raw_data, str):
             payload = json.loads(raw_data)
         else:
-            # tests may pass a dict directly in future
             payload = raw_data
 
+        # Prepare dataframe from request
         X_df = _prepare_features(payload)
 
-        # If no real model is loaded (e.g. in unit tests), we expect
-        # tests to inject a dummy into the global 'model'.
         global model
+
+        # Fallback: unit tests inject their own DummyModel, but if
+        # no model exists AND no injection happened, we return zeros.
         if model is None:
-            # Safe fallback – but in our tests we override 'model'
             predictions = [0] * len(X_df)
             probabilities = [0.0] * len(X_df)
             return {
@@ -109,18 +156,21 @@ def run(raw_data: Any) -> Dict[str, Any]:
                 "probabilities": probabilities,
             }
 
-        # Predict labels
+        # -------------------------
+        # REAL MODEL PREDICTION
+        # -------------------------
         preds = model.predict(X_df)
 
-        # Predict probabilities if supported
+         # Optional probability extraction
         if hasattr(model, "predict_proba"):
             probs_2d = model.predict_proba(X_df)
-            # Assume binary classifier: take probability of class 1
+
+            # Binary classifier to probability of class 1
             probabilities = [row[1] for row in probs_2d]
         else:
             probabilities = [None] * len(preds)
 
-        # Normalise types (numpy -> Python)
+        # Convert numpy arrays to Python lists
         if hasattr(preds, "tolist"):
             predictions = preds.tolist()
         else:
@@ -135,5 +185,5 @@ def run(raw_data: Any) -> Dict[str, Any]:
         }
 
     except Exception as e:
-        # Return error in a consistent JSON structure
+        # NEVER crash the endpoint — return error instead
         return {"error": str(e)}
