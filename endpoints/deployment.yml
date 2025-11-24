@@ -1,0 +1,10 @@
+$schema: https://azuremlschemas.azureedge.net/latest/managedOnlineDeployment.schema.json
+name: blue2
+endpoint_name: code-quality-endpoint
+model: azureml:code_quality_rf_scaled:2
+code_configuration:
+  code: .
+  scoring_script: score.py
+environment: azureml://registries/azureml/environments/sklearn-1.1/versions/14
+instance_type: Standard_F2s_v2
+instance_count: 1

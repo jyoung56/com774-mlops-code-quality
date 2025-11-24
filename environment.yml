@@ -1,0 +1,17 @@
+name: code-quality-env
+dependencies:
+  - python=3.10
+  - pip
+  - pip:
+    - pandas
+    - scikit-learn==1.1.3
+    - azureml-core
+    - azureml-mlflow
+    - azureml-dataset-runtime
+    - joblib
+    - numpy
+    - mlflow
+    - azureml-pipeline
+    - azureml-pipeline-core
+    - azureml-pipeline-steps
+    - azureml-defaults
